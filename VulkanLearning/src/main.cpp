@@ -213,9 +213,30 @@ public:
 
 private:
 
-	void CreateVertexBuffer()
+	void CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usageFlags, VkMemoryPropertyFlags propertiesFlags, VkBuffer& buffer, VkDeviceMemory& bufferMemory)
 	{
-		//Before creating the buffer, we must specify, as ever, a info struct.
+		VkBufferCreateInfo bufferInfo = {};
+		bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+		bufferInfo.size = size;
+		bufferInfo.usage = usageFlags;
+		bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+		
+		VkCheck(vkCreateBuffer(m_Device, &bufferInfo, nullptr, &buffer));
+		
+		VkMemoryRequirements memReq;
+		vkGetBufferMemoryRequirements(m_Device, buffer, &memReq);
+		
+		VkMemoryAllocateInfo allocInfo = {};
+		allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+		allocInfo.allocationSize = memReq.size;
+		allocInfo.memoryTypeIndex = FindMemoryType(memReq.memoryTypeBits, propertiesFlags);
+
+		VkCheck(vkAllocateMemory(m_Device, &allocInfo, nullptr, &bufferMemory));
+
+		VkCheck(vkBindBufferMemory(m_Device, buffer, bufferMemory, 0));
+
+		/* Old Comments about buffer/memory allocation using vertex buffer as an example: 
+				//Before creating the buffer, we must specify, as ever, a info struct.
 		//we will specify the size, how we are going to use it and based on that, it will specify some musts the device need to have
 		//in order to this buffer to be created and used correctly.
 		//One thing to mention is that, creating the buffer itself is not the same as allocating the memory.
@@ -232,8 +253,8 @@ private:
 		//Create the buffer
 		VkCheck(vkCreateBuffer(m_Device, &bufferInfo, nullptr, &m_VertexBuffer));
 
-		//Now that the buffer is created, we need to fetch a bunch of properties that this buffer needs 
-		//so we will use that to allocate space that suits this buffer well 
+		//Now that the buffer is created, we need to fetch a bunch of properties that this buffer needs
+		//so we will use that to allocate space that suits this buffer well
 		//those properties will be mainly MemoryType and Flags (if it is visible from the CPU/Host etc).
 		//The MemoryType mainly specifies how a memory will be allocated, so we need to find the right one for our buffer needs
 		VkMemoryRequirements memRequirements;
@@ -256,22 +277,39 @@ private:
 		//Bind the Buffer with the actual created memory
 		//the buffer is like a view of how the memory should be allocated, laid out etc
 		vkBindBufferMemory(m_Device, m_VertexBuffer, m_VertexBufferMemory, 0);
+		*/
+	}
+
+	void CreateVertexBuffer()
+	{
+		VkDeviceSize bufferSize = sizeof(s_Vertices[0]) * s_Vertices.size();
+
+		VkBuffer stagingBuffer;
+		VkDeviceMemory stagingBufferMemory;
+		CreateBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
 
 		//With the VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT flag we used, we can then map GPU memory to CPU memory
 		//we will simply ask for a region of memory to me mapped and pass a pointer. We will get this pointer pointing to the mapped region
 		//we also could just pass VK_WHOLE_SIZE instead of size, to map to the whole chunk
 		//This is not the best approach for performance (such as staging buffers) but it is useful for many small purposes 
 		void* data;
-		vkMapMemory(m_Device, m_VertexBufferMemory, 0, bufferInfo.size, 0, &data);
+		vkMapMemory(m_Device, stagingBufferMemory, 0, bufferSize, 0, &data);
 		//copy all the data from the vertex buffer cpu to the gpu mapped memory
-		memcpy(data, s_Vertices.data(), (size_t)bufferInfo.size);
+		memcpy(data, s_Vertices.data(), bufferSize);
 		//and then unmap
-		vkUnmapMemory(m_Device, m_VertexBufferMemory);
+		vkUnmapMemory(m_Device, stagingBufferMemory);
 
 		//Usually, memory transfer doesn't need to happen immediately because of N factors (cache is one of them)
 		//also, sometimes even that the transfer occurred, it is not still visible that this happened
 		//so we need to flush that. But since we specify the flag VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, the driver is well aware of that transfer
 		//and will invalidate the cache as soon as the transfer is made
+
+		CreateBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_VertexBuffer, m_VertexBufferMemory);
+
+		CopyBuffer(stagingBuffer, m_VertexBuffer, bufferSize);
+
+		vkDestroyBuffer(m_Device, stagingBuffer, nullptr);
+		vkFreeMemory(m_Device, stagingBufferMemory, nullptr);
 	}
 
 	uint32_t FindMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties)
@@ -291,6 +329,59 @@ private:
 				return i;
 		}
 
+	}
+
+	void CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size)
+	{
+		VkCommandBufferAllocateInfo allocInfo = {};
+		allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+		allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+		allocInfo.commandPool = m_TemporaryCommandPool;
+		allocInfo.commandBufferCount = 1;
+
+		VkCommandBuffer	tempCommandBuffer;
+		vkAllocateCommandBuffers(m_Device, &allocInfo, &tempCommandBuffer);
+
+		VkCommandBufferBeginInfo beginInfo = {};
+		beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+
+		//We are only going to use that command buffer once, this is, just to copy memory and exit.
+		beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+		vkBeginCommandBuffer(tempCommandBuffer, &beginInfo);
+
+		VkBufferCopy copyRegion = {};
+		copyRegion.srcOffset = 0;
+		copyRegion.dstOffset = 0;
+		copyRegion.size = size;
+
+		//We can copy more than one region, we could pass an array of VkBufferCopy 
+		vkCmdCopyBuffer(tempCommandBuffer, srcBuffer, dstBuffer, 1, &copyRegion);
+
+		vkEndCommandBuffer(tempCommandBuffer);
+
+
+		VkSubmitInfo submitInfo = {};
+		submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		submitInfo.commandBufferCount = 1;
+		submitInfo.pCommandBuffers = &tempCommandBuffer;
+
+		VkFenceCreateInfo memoryTransferredFenceInfo = {};
+		memoryTransferredFenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+		VkFence memoryTransferredFence;
+
+		vkCreateFence(m_Device, &memoryTransferredFenceInfo, nullptr, &memoryTransferredFence);
+
+		vkQueueSubmit(m_GraphicsQueueHandle, 1, &submitInfo, memoryTransferredFence);
+
+		//We submit our memory transfer command and then we just freeze the CPU waiting to the memory to be transferred
+		//we then use this allocated memory to draw in the future
+		vkWaitForFences(m_Device, 1, &memoryTransferredFence, VK_TRUE, UINT64_MAX);
+
+		// -- 
+
+		vkDestroyFence(m_Device, memoryTransferredFence, nullptr);
+		vkFreeCommandBuffers(m_Device, m_TemporaryCommandPool, 1, &tempCommandBuffer);
 	}
 
 	void CreateSyncObjects()
@@ -396,8 +487,18 @@ private:
 		poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
 		poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
 		poolInfo.queueFamilyIndex = m_GraphicsQueueFamilyType;
-
+		
 		VkCheck(vkCreateCommandPool(m_Device, &poolInfo, nullptr, &m_CommandPool));
+
+
+
+		VkCommandPoolCreateInfo temporaryPoolInfo = {};
+		temporaryPoolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+		//We will use this pool to create temporary staging buffers
+		temporaryPoolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+		temporaryPoolInfo.queueFamilyIndex = m_GraphicsQueueFamilyType;
+
+		VkCheck(vkCreateCommandPool(m_Device, &temporaryPoolInfo, nullptr, &m_TemporaryCommandPool));
 	}
 	void CreateFramebuffers()
 	{
@@ -1557,6 +1658,7 @@ private:
 		}
 
 		vkDestroyCommandPool(m_Device, m_CommandPool, nullptr);
+		vkDestroyCommandPool(m_Device, m_TemporaryCommandPool, nullptr);
 
 		vkDestroyPipeline(m_Device, m_GraphicsPipeline, nullptr);
 		vkDestroyPipelineLayout(m_Device, m_PipelineLayout, nullptr);
@@ -1610,7 +1712,7 @@ private:
 	VkPipelineLayout m_PipelineLayout;
 
 	//Manages buffer memories and also creates command buffers.
-	VkCommandPool m_CommandPool;
+	VkCommandPool m_CommandPool, m_TemporaryCommandPool;
 	std::vector<VkCommandBuffer> m_CommandBuffers;
 
 	VkPipeline m_GraphicsPipeline;
