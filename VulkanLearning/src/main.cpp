@@ -375,7 +375,12 @@ private:
 		vkQueueSubmit(m_GraphicsQueueHandle, 1, &submitInfo, memoryTransferredFence);
 
 		//We submit our memory transfer command and then we just freeze the CPU waiting to the memory to be transferred
-		//we then use this allocated memory to draw in the future
+		//we then use this allocated memory to draw in the future. So we will wait all previous commands to reach this point, and then we can continue to work from here. 
+		//That way we don't have any race condition and commands from now will be updated.
+		//we also could use VkQueueWaitIdle with the graphics queue. The API documentation says:
+		/*"vkQueueWaitIdle is equivalent to having submitted a valid fence to every previously executed queue submission command that accepts a fence, 
+		then waiting for all of those fences to signal using vkWaitForFences with an infinite timeout and waitAll set to VK_TRUE."*/
+		//and this is equivalent to use the fence and block the CPU until it has reached that point (where all our command list/copy commands are finished).
 		vkWaitForFences(m_Device, 1, &memoryTransferredFence, VK_TRUE, UINT64_MAX);
 
 		// -- 
