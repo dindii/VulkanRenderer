@@ -6,6 +6,11 @@
 #include <glm/vec4.hpp>
 #include <glm/mat4x4.hpp>
 
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+
+#include <chrono>
+
 #include <iostream>
 #include <vector>
 #include <string>
@@ -22,11 +27,18 @@
 
 const uint32_t APP_WIDTH = 2560;
 const uint32_t APP_HEIGHT = 1440;
-const uint32_t MAX_FRAMES_IN_FLIGHT = 2;
+const uint32_t MAX_FRAMES_IN_FLIGHT = 3;
 
 static uint32_t s_CurrentFrame = 0;
 
 const char* g_RequiredValidationLayer = "VK_LAYER_KHRONOS_validation";
+
+enum class EBufferType : uint8_t
+{
+	EBUFFER_TYPE_VERTEX_BUFFER = 0,
+	EBUFFER_TYPE_INDEX_BUFFER = 1,
+
+};
 
 struct Vertex
 {
@@ -77,9 +89,22 @@ struct Vertex
 };
 
 static const std::vector<Vertex> s_Vertices = {
-	{{0.0f, -0.5f}, {1.0f, 0.0f, 0.0f}},
-	{{0.5f, 0.5f}, {1.0f, 0.0f, 1.0f}},
-	{{-0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}} 
+	{{-0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}},
+	{{0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}},
+	{{0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}},
+	{{-0.5f, 0.5f}, {1.0f, 1.0f, 1.0f}}
+};
+
+const std::vector<uint16_t> s_Indices =
+{
+	0, 1, 2, 2, 3, 0
+};
+
+struct UniformBufferObject
+{
+	alignas(16) glm::mat4 model;
+	alignas(16) glm::mat4 view;
+	alignas(16) glm::mat4 proj;
 };
 
 template<typename T>
@@ -199,10 +224,19 @@ public:
 	    CreateSwapChainImageViews();
 
 		CreateRenderPass();
+		CreateDescriptorSetLayout();
 		CreateGraphicsPipeline();
 		CreateFramebuffers();
 		CreateCommandPool();
-		CreateVertexBuffer();
+
+		//CreateDataBuffer<Vertex>(EBufferType::EBUFFER_TYPE_VERTEX_BUFFER, s_Vertices);
+		//CreateDataBuffer<uint16_t>(EBufferType::EBUFFER_TYPE_INDEX_BUFFER, s_Indices);
+
+		// It is a good practice to combine multiple buffers into a single VkBuffer. We are doing that for indices and vertices. We then use the offsets to properly bind those
+		CreateAndCombineDataBuffer();
+		CreateUniformBuffer();
+		CreateDescriptorPool();
+		CreateDescriptorSets();
 		CreateCommandBuffers();
 		CreateSyncObjects();
 
@@ -213,7 +247,118 @@ public:
 
 private:
 
-	void CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usageFlags, VkMemoryPropertyFlags propertiesFlags, VkBuffer& buffer, VkDeviceMemory& bufferMemory)
+	void CreateDescriptorSets()
+	{
+		std::vector<VkDescriptorSetLayout> layouts(MAX_FRAMES_IN_FLIGHT, m_DescriptorSetLayout);
+
+		VkDescriptorSetAllocateInfo allocInfo = {};
+		allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+		allocInfo.descriptorPool = m_DescriptorPool;
+		allocInfo.descriptorSetCount = MAX_FRAMES_IN_FLIGHT;
+		allocInfo.pSetLayouts = layouts.data();
+
+		m_DescriptorSets.resize(MAX_FRAMES_IN_FLIGHT);
+
+		VkCheck(vkAllocateDescriptorSets(m_Device, &allocInfo, m_DescriptorSets.data()));
+
+		for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+		{
+			VkDescriptorBufferInfo bufferInfo = {};
+			bufferInfo.buffer = m_UniformBuffers[i];
+			bufferInfo.offset = 0;
+			bufferInfo.range = sizeof(UniformBufferObject);
+
+			VkWriteDescriptorSet descriptorWrite = {};
+			descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			descriptorWrite.dstSet = m_DescriptorSets[i];
+			descriptorWrite.dstBinding = 0;
+			descriptorWrite.dstArrayElement = 0;
+			descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+			descriptorWrite.descriptorCount = 1;
+			descriptorWrite.pBufferInfo = &bufferInfo;
+			descriptorWrite.pImageInfo = nullptr;
+			descriptorWrite.pTexelBufferView = nullptr;
+
+			vkUpdateDescriptorSets(m_Device, 1, &descriptorWrite, 0, nullptr);
+
+		}
+
+	}
+	void CreateDescriptorPool()
+	{
+		VkDescriptorPoolSize poolSize = {};
+		poolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+		poolSize.descriptorCount = MAX_FRAMES_IN_FLIGHT;
+
+		VkDescriptorPoolCreateInfo poolInfo = {};
+		poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+		poolInfo.poolSizeCount = 1;
+		poolInfo.pPoolSizes = &poolSize;
+		poolInfo.maxSets = MAX_FRAMES_IN_FLIGHT;
+		
+		VkCheck(vkCreateDescriptorPool(m_Device, &poolInfo, nullptr, &m_DescriptorPool));
+	}
+
+	void UpdateUniformBuffer(uint32_t backbufferIdx)
+	{
+		static auto startTime = std::chrono::high_resolution_clock::now();
+
+		auto currentTime = std::chrono::high_resolution_clock::now();
+		float time = std::chrono::duration<float, std::chrono::seconds::period>(currentTime - startTime).count() * 0.5;
+
+		UniformBufferObject UBO = {};
+
+		UBO.model = glm::rotate(glm::mat4(1.0f), glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f)) * glm::rotate(glm::mat4(1.0f), time * glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+
+		UBO.view = glm::lookAt(glm::vec3(0.0f, 1.0f, 2.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+
+		UBO.proj = glm::perspective(glm::radians(45.0f), m_RenderTargetExtent.width / (float)m_RenderTargetExtent.height, 0.1f, 10.0f);
+	
+		UBO.proj[1][1] *= -1;
+
+		memcpy(m_UniformBuffersMappedLocation[backbufferIdx], &UBO, sizeof(UBO));
+	}
+
+	void CreateUniformBuffer()
+	{
+		VkDeviceSize bufferSize = sizeof(UniformBufferObject);
+
+		m_UniformBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+		m_UniformBuffersMemory.resize(MAX_FRAMES_IN_FLIGHT);
+		m_UniformBuffersMappedLocation.resize(MAX_FRAMES_IN_FLIGHT);
+
+		for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+		{
+			CreateInternalBuffer(bufferSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, m_UniformBuffers[i], m_UniformBuffersMemory[i]);
+		
+			vkMapMemory(m_Device, m_UniformBuffersMemory[i], 0, bufferSize, 0, &m_UniformBuffersMappedLocation[i]);
+		}
+	}
+
+	void CreateDescriptorSetLayout()
+	{
+		VkDescriptorSetLayoutBinding uboLayoutBinding = {};
+		uboLayoutBinding.binding = 0;
+		uboLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+		
+		//in case we have an array of UBOs, for transformations in each bone of a skeletal animation, for instance3
+		uboLayoutBinding.descriptorCount = 1;
+		
+		//from where we will be consuming that
+		uboLayoutBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+		//only relevant for image sampling
+		uboLayoutBinding.pImmutableSamplers = nullptr;
+
+		VkDescriptorSetLayoutCreateInfo layoutInfo = {}; 
+		layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+		layoutInfo.bindingCount = 1;
+		layoutInfo.pBindings = &uboLayoutBinding;
+
+		VkCheck(vkCreateDescriptorSetLayout(m_Device, &layoutInfo, nullptr, &m_DescriptorSetLayout));
+	}
+
+	void CreateInternalBuffer(VkDeviceSize size, VkBufferUsageFlags usageFlags, VkMemoryPropertyFlags propertiesFlags, VkBuffer& buffer, VkDeviceMemory& bufferMemory)
 	{
 		VkBufferCreateInfo bufferInfo = {};
 		bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -231,6 +376,10 @@ private:
 		allocInfo.allocationSize = memReq.size;
 		allocInfo.memoryTypeIndex = FindMemoryType(memReq.memoryTypeBits, propertiesFlags);
 
+		//#NOTE We usually have limited amount of simultaneous/on-use memory allocations. For instance, if the GPU only allows 4096 allocations, then you can only have 4096 graphic objects.
+		//One thing that usually solves this is to allocate less buffers but with bigger amount of memory, then use the offset to navigate through it.
+		//In those cases, a custom memory allocator could be good. One good option is the VulkanMemoryAllocator, such allocator manages the buffers in a lot of ways.
+		//But it is not always that your game have more than 4096 graphic objects, so it is good to ensure that it is needed first.
 		VkCheck(vkAllocateMemory(m_Device, &allocInfo, nullptr, &bufferMemory));
 
 		VkCheck(vkBindBufferMemory(m_Device, buffer, bufferMemory, 0));
@@ -280,13 +429,14 @@ private:
 		*/
 	}
 
-	void CreateVertexBuffer()
+	template<typename T>
+	void CreateDataBuffer(EBufferType bufferType, const std::vector<T>& cpuData)
 	{
-		VkDeviceSize bufferSize = sizeof(s_Vertices[0]) * s_Vertices.size();
+		VkDeviceSize bufferSize = sizeof(cpuData[0]) * cpuData.size();
 
 		VkBuffer stagingBuffer;
 		VkDeviceMemory stagingBufferMemory;
-		CreateBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
+		CreateInternalBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
 
 		//With the VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT flag we used, we can then map GPU memory to CPU memory
 		//we will simply ask for a region of memory to me mapped and pass a pointer. We will get this pointer pointing to the mapped region
@@ -295,7 +445,7 @@ private:
 		void* data;
 		vkMapMemory(m_Device, stagingBufferMemory, 0, bufferSize, 0, &data);
 		//copy all the data from the vertex buffer cpu to the gpu mapped memory
-		memcpy(data, s_Vertices.data(), bufferSize);
+		memcpy(data, cpuData.data(), bufferSize);
 		//and then unmap
 		vkUnmapMemory(m_Device, stagingBufferMemory);
 
@@ -303,10 +453,54 @@ private:
 		//also, sometimes even that the transfer occurred, it is not still visible that this happened
 		//so we need to flush that. But since we specify the flag VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, the driver is well aware of that transfer
 		//and will invalidate the cache as soon as the transfer is made
+		if(bufferType == EBufferType::EBUFFER_TYPE_VERTEX_BUFFER)
+		{
+			CreateInternalBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_VertexBuffer, m_VertexBufferMemory);
+			CopyBuffer(stagingBuffer, m_VertexBuffer, bufferSize);
+		}
+		else
+		{
+			CreateInternalBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_IndexBuffer, m_IndexBufferMemory);
+			CopyBuffer(stagingBuffer, m_IndexBuffer, bufferSize);
+		}
 
-		CreateBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_VertexBuffer, m_VertexBufferMemory);
 
+		vkDestroyBuffer(m_Device, stagingBuffer, nullptr);
+		vkFreeMemory(m_Device, stagingBufferMemory, nullptr);
+	}
+
+
+	void CreateAndCombineDataBuffer()
+	{
+		VkDeviceSize vertexBufferSize = sizeof(s_Vertices[0]) * s_Vertices.size();
+		VkDeviceSize indexBufferSize = sizeof(s_Indices[0]) * s_Indices.size();
+
+		VkDeviceSize bufferSize = vertexBufferSize + indexBufferSize;
+
+		VkBuffer stagingBuffer;
+		VkDeviceMemory stagingBufferMemory;
+		CreateInternalBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
+
+		//With the VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT flag we used, we can then map GPU memory to CPU memory
+		//we will simply ask for a region of memory to me mapped and pass a pointer. We will get this pointer pointing to the mapped region
+		//we also could just pass VK_WHOLE_SIZE instead of size, to map to the whole chunk
+		//This is not the best approach for performance (such as staging buffers) but it is useful for many small purposes 
+		void* data;
+		vkMapMemory(m_Device, stagingBufferMemory, 0, bufferSize, 0, &data);
+		//copy all the data from the vertex buffer cpu to the gpu mapped memory
+		memcpy(data, s_Vertices.data(), vertexBufferSize);
+		memcpy((char*)data + vertexBufferSize, s_Indices.data(), indexBufferSize);
+		//and then unmap
+		vkUnmapMemory(m_Device, stagingBufferMemory);
+
+		//Usually, memory transfer doesn't need to happen immediately because of N factors (cache is one of them)
+		//also, sometimes even that the transfer occurred, it is not still visible that this happened
+		//so we need to flush that. But since we specify the flag VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, the driver is well aware of that transfer
+		//and will invalidate the cache as soon as the transfer is made
+	
+		CreateInternalBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_VertexBuffer, m_VertexBufferMemory);
 		CopyBuffer(stagingBuffer, m_VertexBuffer, bufferSize);
+
 
 		vkDestroyBuffer(m_Device, stagingBuffer, nullptr);
 		vkFreeMemory(m_Device, stagingBufferMemory, nullptr);
@@ -345,7 +539,8 @@ private:
 		VkCommandBufferBeginInfo beginInfo = {};
 		beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 
-		//We are only going to use that command buffer once, this is, just to copy memory and exit.
+		//We are only going to use that command buffer once, this is, just to copy memory and exit. So we just give this hint to the driver and let it to optimize if it wants.
+		//Also, with this flag we say that we are not going to reset this command buffer explicitly (via Reset command) or implicitly (with BeginCommandBuffer)
 		beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 
 		vkBeginCommandBuffer(tempCommandBuffer, &beginInfo);
@@ -444,7 +639,17 @@ private:
 
 		//This is where we set the offset inside the vertex buffer. If we have, for instance, a buffer that is not interleaved, we would here set the offset for each bind (for instance, UV * UVElements).
 		VkDeviceSize vertexBuffersToBindOffsets[] = { 0 };
+
+		//Now the vertex buffer is mixed with the index buffer. The vertex attributes knows exactly its size and how far they go. Even if we never use the index data, the vertex attribute will always stop to fetch values before the end of the vertex buffer
+		//because they know the stride, the size and the offset of each
 		vkCmdBindVertexBuffers(buffer, 0, 1, vertexBuffersToBind, vertexBuffersToBindOffsets);
+
+		//vkCmdBindIndexBuffer(buffer, m_IndexBuffer, 0, VK_INDEX_TYPE_UINT16);
+
+		//You just set the beginning of the index buffer. Vulkan will use this information and run through the index buffer, probably it takes the index you want and multiply that for the stride of the vertex, then it sums the vertex offset, leading to the desired vertex.
+		//If you feed the data correctly, when the index buffer reaches the end, it will also reach the end of the vertex buffer, stopping one element before starting the index buffer (since we are using the very same buffer).
+		//If you feed incorrectly, then it can begin to fetch data from the IB itself.
+		vkCmdBindIndexBuffer(buffer, m_VertexBuffer, sizeof(s_Vertices[0]) * s_Vertices.size(), VK_INDEX_TYPE_UINT16);
 
 		VkViewport viewport = {};
 		viewport.x = 0.0f;
@@ -460,7 +665,8 @@ private:
 		scissor.extent = m_RenderTargetExtent;
 		vkCmdSetScissor(buffer, 0, 1, &scissor);
 
-		vkCmdDraw(buffer, s_Vertices.size(), 1, 0, 0);
+		vkCmdBindDescriptorSets(buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_PipelineLayout, 0, 1, &m_DescriptorSets[imageIndex], 0, nullptr);
+		vkCmdDrawIndexed(buffer, s_Indices.size(), 1, 0, 0, 0);
 
 		vkCmdEndRenderPass(buffer);
 
@@ -813,7 +1019,8 @@ private:
 		rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
 
 		//define in which order a face is considered to be front
-		rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
+	//	rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
+		rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
 
 		//Depth bias is usually useful for shadow mapping. We are not going to use it right now.
 		rasterizer.depthBiasEnable = VK_FALSE;
@@ -859,11 +1066,11 @@ private:
 		colorBlending.blendConstants[2] = 0.0f; // Optional
 		colorBlending.blendConstants[3] = 0.0f; // Optional
 
-		//This is used to pass Uniforms to shaders. We will create an empty one for now.
+		//This is used to pass Uniforms to shaders. 
 		VkPipelineLayoutCreateInfo pipelineLayoutInfo = {};
 		pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-		pipelineLayoutInfo.setLayoutCount = 0;
-		pipelineLayoutInfo.pSetLayouts = nullptr;
+		pipelineLayoutInfo.setLayoutCount = 1;
+		pipelineLayoutInfo.pSetLayouts = &m_DescriptorSetLayout;
 		pipelineLayoutInfo.pushConstantRangeCount = 0;
 		pipelineLayoutInfo.pPushConstantRanges = nullptr;
 
@@ -1558,6 +1765,8 @@ private:
 			return;
 		}
 		
+		UpdateUniformBuffer(s_CurrentFrame);
+
 		// Only reset the fence if we are submitting work
 		vkResetFences(m_Device, 1, &m_InFlightFrameFences[s_CurrentFrame]);
 
@@ -1652,8 +1861,21 @@ private:
 	{
 		CleanupSwapChain();
 
+		for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+		{
+			vkDestroyBuffer(m_Device, m_UniformBuffers[i], nullptr);
+			vkFreeMemory(m_Device, m_UniformBuffersMemory[i], nullptr);
+		}
+		
+		vkDestroyDescriptorPool(m_Device, m_DescriptorPool, nullptr);
+
+		vkDestroyDescriptorSetLayout(m_Device, m_DescriptorSetLayout, nullptr);
+
 		vkDestroyBuffer(m_Device, m_VertexBuffer, nullptr);
 		vkFreeMemory(m_Device, m_VertexBufferMemory, nullptr);
+
+		vkDestroyBuffer(m_Device, m_IndexBuffer, nullptr);
+		vkFreeMemory(m_Device, m_IndexBufferMemory, nullptr);
 
 		for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
 		{
@@ -1714,7 +1936,11 @@ private:
 	VkExtent2D m_RenderTargetExtent;
 
 	VkRenderPass m_RenderPass;
+	
+	VkDescriptorSetLayout m_DescriptorSetLayout;
 	VkPipelineLayout m_PipelineLayout;
+	VkDescriptorPool m_DescriptorPool;
+	std::vector<VkDescriptorSet> m_DescriptorSets;
 
 	//Manages buffer memories and also creates command buffers.
 	VkCommandPool m_CommandPool, m_TemporaryCommandPool;
@@ -1729,6 +1955,15 @@ private:
 
 	VkBuffer m_VertexBuffer;
 	VkDeviceMemory m_VertexBufferMemory;
+
+	std::vector<VkBuffer> m_UniformBuffers;
+	std::vector<VkDeviceMemory> m_UniformBuffersMemory;
+	std::vector<void*> m_UniformBuffersMappedLocation;
+
+	VkBuffer m_IndexBuffer;
+	VkDeviceMemory m_IndexBufferMemory;
+
+	
 
 	bool m_WindowResized = false;
 };
