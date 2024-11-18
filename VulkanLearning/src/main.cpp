@@ -1,3 +1,6 @@
+#define STB_IMAGE_IMPLEMENTATION
+#include <stbi/stb_image.h>
+
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
@@ -25,6 +28,7 @@
 
 #include <map>
 
+
 const uint32_t APP_WIDTH = 2560;
 const uint32_t APP_HEIGHT = 1440;
 const uint32_t MAX_FRAMES_IN_FLIGHT = 3;
@@ -44,6 +48,7 @@ struct Vertex
 {
 	glm::vec2 position;
 	glm::vec3 color;
+	glm::vec2 texCoord;
 
 	static VkVertexInputBindingDescription GetBindingDescription()
 	{
@@ -67,9 +72,9 @@ struct Vertex
 		return bindingDescription;
 	}
 
-	static std::array<VkVertexInputAttributeDescription, 2> GetAttributeDescriptions()
+	static std::array<VkVertexInputAttributeDescription, 3> GetAttributeDescriptions()
 	{
-		std::array<VkVertexInputAttributeDescription, 2> attributeDescriptions = {};
+		std::array<VkVertexInputAttributeDescription, 3> attributeDescriptions = {};
 
 		
 		attributeDescriptions[0].binding = 0;
@@ -84,15 +89,20 @@ struct Vertex
 		attributeDescriptions[1].format = VK_FORMAT_R32G32B32_SFLOAT;
 		attributeDescriptions[1].offset = offsetof(Vertex, color);
 
+		attributeDescriptions[2].binding = 0;
+		attributeDescriptions[2].location = 2;
+		attributeDescriptions[2].format = VK_FORMAT_R32G32_SFLOAT;
+		attributeDescriptions[2].offset = offsetof(Vertex, texCoord);
+
 		return attributeDescriptions;
 	}
 };
 
 static const std::vector<Vertex> s_Vertices = {
-	{{-0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}},
-	{{0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}},
-	{{0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}},
-	{{-0.5f, 0.5f}, {1.0f, 1.0f, 1.0f}}
+	{{-0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}},
+	{{0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}},
+	{{0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f}},
+	{{-0.5f, 0.5f}, {1.0f, 1.0f, 1.0f}, {1.0f, 1.0f}}
 };
 
 const std::vector<uint16_t> s_Indices =
@@ -228,7 +238,9 @@ public:
 		CreateGraphicsPipeline();
 		CreateFramebuffers();
 		CreateCommandPool();
-
+		CreateTextureImage();
+		CreateTextureImageView();
+		CreateTextureSampler();
 		//CreateDataBuffer<Vertex>(EBufferType::EBUFFER_TYPE_VERTEX_BUFFER, s_Vertices);
 		//CreateDataBuffer<uint16_t>(EBufferType::EBUFFER_TYPE_INDEX_BUFFER, s_Indices);
 
@@ -246,6 +258,332 @@ public:
 	};
 
 private:
+
+	VkImageView CreateImageView(VkImage image, VkFormat format)
+	{
+		VkImageViewCreateInfo viewInfo = {};
+		viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		viewInfo.image = image;
+		viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		viewInfo.format = format;
+		viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		viewInfo.subresourceRange.baseMipLevel = 0;
+		viewInfo.subresourceRange.levelCount = 1;
+		viewInfo.subresourceRange.baseArrayLayer = 0;
+		viewInfo.subresourceRange.layerCount = 1;
+
+		VkImageView viewHandle;
+
+		VkCheck(vkCreateImageView(m_Device, &viewInfo, nullptr, &viewHandle));
+	
+		return viewHandle;
+	}
+	
+	void CreateTextureImageView()
+	{
+		m_TextureImageView = CreateImageView(m_TextureImageObj, VK_FORMAT_R8G8B8A8_SRGB);
+	}
+
+
+
+
+	void CreateTextureSampler()
+	{
+		VkSamplerCreateInfo samplerInfo = {};
+		
+		samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+		samplerInfo.magFilter = VK_FILTER_LINEAR;
+		samplerInfo.minFilter = VK_FILTER_LINEAR;
+		
+		samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+		samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+		samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+		
+		VkPhysicalDeviceProperties properties = {};
+		vkGetPhysicalDeviceProperties(m_PhysicalGPU, &properties);
+
+		samplerInfo.anisotropyEnable = VK_TRUE;
+		samplerInfo.maxAnisotropy = properties.limits.maxSamplerAnisotropy;
+		
+		samplerInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+
+		//If we want sample the texture using [0, texWidth] and [0, textHeight] or [0, 1] for both
+		samplerInfo.unnormalizedCoordinates = VK_FALSE;
+
+		samplerInfo.compareEnable = VK_FALSE;
+		samplerInfo.compareOp = VK_COMPARE_OP_ALWAYS;
+
+		samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+		samplerInfo.mipLodBias = 0.0f;
+		samplerInfo.minLod = 0.0f;
+		samplerInfo.maxLod = 0.0f;
+
+		VkCheck(vkCreateSampler(m_Device, &samplerInfo, nullptr, &m_TextureSampler));
+	}
+
+
+	void CreateImage(uint32_t width, uint32_t height, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkMemoryPropertyFlags properties, VkImage& image, VkDeviceMemory& imageMemory)
+	{
+		VkImageCreateInfo imageInfo{};
+		imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+		imageInfo.imageType = VK_IMAGE_TYPE_2D;
+		imageInfo.extent.width = width;
+		imageInfo.extent.height = height;
+		imageInfo.extent.depth = 1;
+		imageInfo.mipLevels = 1;
+		imageInfo.arrayLayers = 1;
+		imageInfo.format = format;
+
+		/*
+		VK_IMAGE_TILING_LINEAR: Texels are laid out in row-major order like our pixels array
+        VK_IMAGE_TILING_OPTIMAL: Texels are laid out in an implementation defined order for optimal access */
+		// If you want to be able to directly access texels in the memory of the image, then you must use VK_IMAGE_TILING_LINEAR. 
+		//We will be using a staging buffer instead of a staging image, so this won't be necessary. 
+		imageInfo.tiling = tiling;
+
+		//You can have either UNDEFINED where it discards all data in an image when it first transitions
+		//or PREINITIALIZED where it keeps the data after a transition.
+		//If you already have an image with data and then want to turn this image to a transfer src in order to use it as a stage buffer
+		//you need to use the PREINITIALIZED data so you dont lose your texels when the transition happens.
+		//In our case since we are transitioning the image to transfer dst and then uploading the data to it, so we will have nothing to lose there
+		imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+
+		//Since this image is the equivalent of the final destination buffer (where the staging will copy data to, so we can have fast memory on gpu)
+		//we are going to set is as DST. Also, as we DO want to sample it from shaders and stuff, we need to set usage as SAMPLED_BIT.
+		imageInfo.usage = usage;
+		imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+		imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+		VkCheck(vkCreateImage(m_Device, &imageInfo, nullptr, &image));
+
+
+		VkMemoryRequirements imageMemRequirements;
+		vkGetImageMemoryRequirements(m_Device, image, &imageMemRequirements);
+
+		VkMemoryAllocateInfo allocInfo = {};
+		allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+		allocInfo.allocationSize = imageMemRequirements.size;
+		allocInfo.memoryTypeIndex = FindMemoryType(imageMemRequirements.memoryTypeBits, properties);
+
+		VkCheck(vkAllocateMemory(m_Device, &allocInfo, nullptr, &imageMemory));
+
+		vkBindImageMemory(m_Device, image, imageMemory, 0);
+	}
+
+	void CreateTextureImage()
+	{
+		int texWidth = 0, texHeight = 0, numChannels = 0;
+		stbi_uc* data = stbi_load("res/textures/texture.jpg", &texWidth, &texHeight, &numChannels, STBI_rgb_alpha);
+
+		VkDeviceSize imageSize = texHeight * texWidth * STBI_rgb_alpha;
+
+		if (!data)
+		{
+			std::cerr << "Failed to load texture.";
+			__debugbreak();
+		}
+
+		VkBuffer textureStagingBuffer;
+		VkDeviceMemory textureStagingBufferMemory;
+		
+		CreateInternalBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, textureStagingBuffer, textureStagingBufferMemory);
+		
+		void* cpuMappedData;
+		vkMapMemory(m_Device, textureStagingBufferMemory, 0, imageSize, 0, &cpuMappedData);
+		memcpy(cpuMappedData, data, imageSize);
+		vkUnmapMemory(m_Device, textureStagingBufferMemory);
+
+		stbi_image_free(data);
+
+		CreateImage(texWidth, texHeight, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_TextureImageObj, m_TextureImageObjMemory);
+
+		//the image was created with UNDEFINED so we will keep it on old layout.
+		//also, we don't care about what is on the texture because there is nothing yet
+		//when we copy data to there, then we can carefully set the old as TRANSFER_DST_OPTIMAL 
+		TransitionImageLayout(m_TextureImageObj, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+		CopyBufferToImage(textureStagingBuffer, m_TextureImageObj, (uint32_t)texWidth, (uint32_t)texHeight);
+
+		TransitionImageLayout(m_TextureImageObj, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+	
+		vkDestroyBuffer(m_Device, textureStagingBuffer, nullptr);
+		vkFreeMemory(m_Device, textureStagingBufferMemory, nullptr);
+	}
+
+	void TransitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout)
+	{
+		VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
+
+		VkImageMemoryBarrier barrier = {};
+		barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		barrier.oldLayout = oldLayout;
+		barrier.newLayout = newLayout;
+
+		//If you are using the barrier to transfer queue family ownership, then these two fields should be the indices of the queue families. 
+		//They must be set to VK_QUEUE_FAMILY_IGNORED if you don't want to do this (not the default value!).
+		barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+
+		barrier.image = image;
+		barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		barrier.subresourceRange.baseMipLevel = 0;
+		barrier.subresourceRange.levelCount = 1;
+		barrier.subresourceRange.baseArrayLayer = 0;
+		barrier.subresourceRange.layerCount = 1;
+
+		VkPipelineStageFlags sourceStage;
+		VkPipelineStageFlags destinationStage;
+
+		if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
+		{
+			//We can write to our image anytime, so we don't need to wait on nothing
+			barrier.srcAccessMask = 0;
+
+			//All other operations needs to wait until WRITE (for instance, reading or presenting)
+			barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+			//Basically, we are only waiting all operations in the beginning of the pipeline to finish
+			//this includes all operations before (in this case, nothing)
+			//this usually just means nothing, we are waiting on nothing. We can begin the work right away
+			//sourceStage is usually defined as "we need to wait all commands of Src stage to complete"
+			//this only affects commands on Src Stage
+			sourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+
+			//And Destination Stage is "all commands on this dest stage needs to wait before all work on src stage to finish"
+			//So all commands on TRANSFER stage needs to wait until... the pipeline begins
+			destinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+		}
+		else if (oldLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && newLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+		{
+			//We need to wait until all commands on TRANSFER stage were completed
+			sourceStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+			
+			//All commands on FRAGMENT stage must wait until all commands on TRANSFER stage are done
+			//So this defines what stage commands will wait on what stage commands
+			//in our case, our command can go all the way through the pipeline (input, vertex etc)
+			//but it MUST stop on the FRAGMENT SHADER stage. And it will only be allowed to continue
+			//when command on TRANSFER stage are done.
+			destinationStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+
+			//Likewise, for instance, we must wait until commands on the first scope of sync (src)
+			//reaches out the defined STAGE, so by consequence we are also waiting on all STAGES prior to the src command
+			//The same is for the second scope (dst), we must wait on FRAGMENT_SHADER, so we are not allowed to skip FRAGMENT SHADER stage
+			//then we are effectively also blocking all steps after DST, since we follow down the line in a linear pattern
+			
+			//So, along with the stages, you must specify an operation. This operation lets the API to know what are you planning to do with the data and how it can handles it
+			//it also waits for that operation.
+			//When you fetch the data, the data will be on the L2 cache. So it is Available. When the data is then fetch to the L1 cache to have actual work done, it is Visible.
+			//if you are not only reading to it but also writing to the data, once the write is done and the L2 cache is different from L1, then you have to invalidate the L2 cache 
+			//because only one "core" is using the up-to-date data. So this L2 data is not Available anymore.
+			//When the WRITE operation is done, we then copy that data from the L1 cache to the L2, thus making it Available again for other cores
+			//then, when the next stage wants to READ it, it can check the data that is Available on L2 cache and then fetch it to its L1 cache, making it Visible to read.
+			//So in a scenario where we are writing to a texture to then fetch it on the fragment shader, the src would be COLOR_ATTACHMENT_OUTPUT with data access being COLOR_ATTACHMENT_WRITE
+			//and then the dst stage would be FRAGMENT_SHADER and the access SHADER_READ.
+			//and essentially we would let all commands to run until the fragment shader, and when reaching the fragment shader, it would wait on the commands to get over COLOR_ATTACHMENT_OUTPUT
+			//with all the data mask we set, it would also not only wait to get over the COLOR_ATTACHMENT_OUTPUT stage to finish but also all the data to finish the WRITE, thus making the data AVAILABLE again
+			//when finally the stage is over, data is written and available, we (other commands) can then proceed to FRAGMENT_SHADER and make the data VISIBLE by fetching it for READ. 
+			//If we hadn't this WRITE on the COLOR_ATTACHMENT_OUPUT we would not need to wait for that operation, only the stage, because since we are only reading the data, there's no way to make the data not available.
+			barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+			barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+		}
+		else
+		{
+			std::cerr << "Unsupported layout transition!";
+			__debugbreak();
+		}
+
+		vkCmdPipelineBarrier(commandBuffer, sourceStage, destinationStage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+		EndSingleTimeCommands(commandBuffer);
+	}
+
+	void CopyBufferToImage(VkBuffer buffer, VkImage image, uint32_t width, uint32_t height)
+	{
+		VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
+
+		VkBufferImageCopy region = {};
+
+		//byte offset in the buffer of the pixels to begin
+		region.bufferOffset = 0;
+
+		//The bufferRowLength and bufferImageHeight fields specify how the pixels are laid out in memory.
+		//For example, you could have some padding bytes between rows of the image.
+		//Specifying 0 for both indicates that the pixels are simply tightly packed like they are in our case.
+		region.bufferRowLength = 0;
+		region.bufferImageHeight = 0;
+
+
+		//part of the image that we want to copy
+		region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		region.imageSubresource.mipLevel = 0;
+		region.imageSubresource.baseArrayLayer = 0;
+		region.imageSubresource.layerCount = 1;
+
+		region.imageOffset = { 0, 0, 0 };
+		region.imageExtent = { width, height, 1 };
+
+		vkCmdCopyBufferToImage(commandBuffer, buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+		EndSingleTimeCommands(commandBuffer);
+	}
+
+	VkCommandBuffer BeginSingleTimeCommands()
+	{
+		//Create a new primary (directly to queue) command buffer
+		VkCommandBufferAllocateInfo allocInfo = {};
+		allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+		allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+		allocInfo.commandPool = m_TemporaryCommandPool;
+		allocInfo.commandBufferCount = 1;
+
+		VkCommandBuffer commandBuffer;
+		vkAllocateCommandBuffers(m_Device, &allocInfo, &commandBuffer);
+
+		VkCommandBufferBeginInfo beginInfo = {};
+		beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+
+		//We are only going to use that command buffer once, this is, just to copy memory and exit. So we just give this hint to the driver and let it to optimize if it wants.
+		//Also, with this flag we say that we are not going to reset this command buffer explicitly (via Reset command) or implicitly (with BeginCommandBuffer)
+		beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+		vkBeginCommandBuffer(commandBuffer, &beginInfo);
+
+		return commandBuffer;
+	}
+
+	void EndSingleTimeCommands(VkCommandBuffer commandBuffer)
+	{
+		vkEndCommandBuffer(commandBuffer);
+
+		VkSubmitInfo submitInfo = {};
+		submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		submitInfo.commandBufferCount = 1;
+		submitInfo.pCommandBuffers = &commandBuffer;
+
+		VkFenceCreateInfo memoryTransferredFenceInfo = {};
+		memoryTransferredFenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+		VkFence memoryTransferredFence;
+
+		vkCreateFence(m_Device, &memoryTransferredFenceInfo, nullptr, &memoryTransferredFence);
+
+		vkQueueSubmit(m_GraphicsQueueHandle, 1, &submitInfo, memoryTransferredFence);
+		
+		//We submit our memory transfer command and then we just freeze the CPU waiting to the memory to be transferred
+		//we then use this allocated memory to draw in the future. So we will wait all previous commands to reach this point, and then we can continue to work from here. 
+		//That way we don't have any race condition and commands from now will be updated.
+		//we also could use VkQueueWaitIdle with the graphics queue. The API documentation says:
+		/*"vkQueueWaitIdle is equivalent to having submitted a valid fence to every previously executed queue submission command that accepts a fence,
+		then waiting for all of those fences to signal using vkWaitForFences with an infinite timeout and waitAll set to VK_TRUE."*/
+		//and this is equivalent to use the fence and block the CPU until it has reached that point (where all our command list/copy commands are finished).
+		vkWaitForFences(m_Device, 1, &memoryTransferredFence, VK_TRUE, UINT64_MAX);
+
+		//vkQueueWaitIdle(m_GraphicsQueueHandle);
+
+		vkDestroyFence(m_Device, memoryTransferredFence, nullptr);
+
+		//since this function is only for single time command buffers (send once) we will free it here
+		vkFreeCommandBuffers(m_Device, m_TemporaryCommandPool, 1, &commandBuffer);
+	}
 
 	void CreateDescriptorSets()
 	{
@@ -268,32 +606,59 @@ private:
 			bufferInfo.offset = 0;
 			bufferInfo.range = sizeof(UniformBufferObject);
 
-			VkWriteDescriptorSet descriptorWrite = {};
-			descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-			descriptorWrite.dstSet = m_DescriptorSets[i];
-			descriptorWrite.dstBinding = 0;
-			descriptorWrite.dstArrayElement = 0;
-			descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-			descriptorWrite.descriptorCount = 1;
-			descriptorWrite.pBufferInfo = &bufferInfo;
-			descriptorWrite.pImageInfo = nullptr;
-			descriptorWrite.pTexelBufferView = nullptr;
+			VkDescriptorImageInfo imageInfo = {};
+			imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			imageInfo.imageView = m_TextureImageView;
+			imageInfo.sampler = m_TextureSampler;
 
-			vkUpdateDescriptorSets(m_Device, 1, &descriptorWrite, 0, nullptr);
+			VkWriteDescriptorSet descriptorWrites[2] = {};
+			descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			descriptorWrites[0].dstSet = m_DescriptorSets[i];
+			descriptorWrites[0].dstBinding = 0;
+			descriptorWrites[0].dstArrayElement = 0;
+			descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+			descriptorWrites[0].descriptorCount = 1;
+			descriptorWrites[0].pBufferInfo = &bufferInfo;
+			descriptorWrites[0].pImageInfo = nullptr;
+			descriptorWrites[0].pTexelBufferView = nullptr;
+
+			descriptorWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			descriptorWrites[1].dstSet = m_DescriptorSets[i];
+			descriptorWrites[1].dstBinding = 1;
+			descriptorWrites[1].dstArrayElement = 0;
+			descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+			descriptorWrites[1].descriptorCount = 1;
+			descriptorWrites[1].pImageInfo = &imageInfo;
+			descriptorWrites[1].pBufferInfo = nullptr;
+			descriptorWrites[1].pTexelBufferView = nullptr;
+
+			uint32_t writeCount = sizeof(descriptorWrites) / sizeof(VkWriteDescriptorSet);
+
+			vkUpdateDescriptorSets(m_Device, writeCount, descriptorWrites, 0, nullptr);
 
 		}
 
 	}
 	void CreateDescriptorPool()
 	{
-		VkDescriptorPoolSize poolSize = {};
-		poolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-		poolSize.descriptorCount = MAX_FRAMES_IN_FLIGHT;
+		VkDescriptorPoolSize poolSizes[2] = {};
+
+		poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+		poolSizes[0].descriptorCount = (uint32_t)MAX_FRAMES_IN_FLIGHT;
+		poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		poolSizes[1].descriptorCount = (uint32_t)MAX_FRAMES_IN_FLIGHT;
 
 		VkDescriptorPoolCreateInfo poolInfo = {};
 		poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-		poolInfo.poolSizeCount = 1;
-		poolInfo.pPoolSizes = &poolSize;
+		poolInfo.poolSizeCount = sizeof(poolSizes) / sizeof(VkDescriptorPoolSize);
+		poolInfo.pPoolSizes = poolSizes;
+
+		//Set is a group of descriptors. We can't bind descriptors individually, so we must bind a set
+		//in our case, each set will have 2 descriptors, one uniform buffer and one sampler
+		//we create 3, one set for each frame (so the data is safely accessed) 
+		//so we set this to 3. On the PoolSize.descriptorCount we set how many each descriptor will be created from this pool across all sets
+		//so we have 3 for each descriptor, because each set will have one of each descriptor. So, 3 sets, 1 descriptor for each, 3 descriptors of each type.
+		//That way we define the max amount of descriptors of each type and the max amount of sets that will be created from this pool
 		poolInfo.maxSets = MAX_FRAMES_IN_FLIGHT;
 		
 		VkCheck(vkCreateDescriptorPool(m_Device, &poolInfo, nullptr, &m_DescriptorPool));
@@ -315,7 +680,6 @@ private:
 		UBO.proj = glm::perspective(glm::radians(45.0f), m_RenderTargetExtent.width / (float)m_RenderTargetExtent.height, 0.1f, 10.0f);
 	
 		UBO.proj[1][1] *= -1;
-
 		memcpy(m_UniformBuffersMappedLocation[backbufferIdx], &UBO, sizeof(UBO));
 	}
 
@@ -350,10 +714,23 @@ private:
 		//only relevant for image sampling
 		uboLayoutBinding.pImmutableSamplers = nullptr;
 
+		//-- 
+
+		VkDescriptorSetLayoutBinding samplerLayoutBinding = {};
+		samplerLayoutBinding.binding = 1;
+		samplerLayoutBinding.descriptorCount = 1;
+		samplerLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		samplerLayoutBinding.pImmutableSamplers = nullptr;
+
+		//In this case we want to use the texture itself to the fragment, but we could use a heightmap and set the stage for vertex
+		samplerLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+		
+		VkDescriptorSetLayoutBinding bindings[2] = { uboLayoutBinding, samplerLayoutBinding };
+
 		VkDescriptorSetLayoutCreateInfo layoutInfo = {}; 
 		layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-		layoutInfo.bindingCount = 1;
-		layoutInfo.pBindings = &uboLayoutBinding;
+		layoutInfo.bindingCount = sizeof(bindings) / sizeof(VkDescriptorSetLayoutBinding);
+		layoutInfo.pBindings = bindings;
 
 		VkCheck(vkCreateDescriptorSetLayout(m_Device, &layoutInfo, nullptr, &m_DescriptorSetLayout));
 	}
@@ -527,23 +904,7 @@ private:
 
 	void CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size)
 	{
-		VkCommandBufferAllocateInfo allocInfo = {};
-		allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-		allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-		allocInfo.commandPool = m_TemporaryCommandPool;
-		allocInfo.commandBufferCount = 1;
-
-		VkCommandBuffer	tempCommandBuffer;
-		vkAllocateCommandBuffers(m_Device, &allocInfo, &tempCommandBuffer);
-
-		VkCommandBufferBeginInfo beginInfo = {};
-		beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-
-		//We are only going to use that command buffer once, this is, just to copy memory and exit. So we just give this hint to the driver and let it to optimize if it wants.
-		//Also, with this flag we say that we are not going to reset this command buffer explicitly (via Reset command) or implicitly (with BeginCommandBuffer)
-		beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-
-		vkBeginCommandBuffer(tempCommandBuffer, &beginInfo);
+		VkCommandBuffer	tempCommandBuffer = BeginSingleTimeCommands();
 
 		VkBufferCopy copyRegion = {};
 		copyRegion.srcOffset = 0;
@@ -553,35 +914,7 @@ private:
 		//We can copy more than one region, we could pass an array of VkBufferCopy 
 		vkCmdCopyBuffer(tempCommandBuffer, srcBuffer, dstBuffer, 1, &copyRegion);
 
-		vkEndCommandBuffer(tempCommandBuffer);
-
-
-		VkSubmitInfo submitInfo = {};
-		submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-		submitInfo.commandBufferCount = 1;
-		submitInfo.pCommandBuffers = &tempCommandBuffer;
-
-		VkFenceCreateInfo memoryTransferredFenceInfo = {};
-		memoryTransferredFenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-		VkFence memoryTransferredFence;
-
-		vkCreateFence(m_Device, &memoryTransferredFenceInfo, nullptr, &memoryTransferredFence);
-
-		vkQueueSubmit(m_GraphicsQueueHandle, 1, &submitInfo, memoryTransferredFence);
-
-		//We submit our memory transfer command and then we just freeze the CPU waiting to the memory to be transferred
-		//we then use this allocated memory to draw in the future. So we will wait all previous commands to reach this point, and then we can continue to work from here. 
-		//That way we don't have any race condition and commands from now will be updated.
-		//we also could use VkQueueWaitIdle with the graphics queue. The API documentation says:
-		/*"vkQueueWaitIdle is equivalent to having submitted a valid fence to every previously executed queue submission command that accepts a fence, 
-		then waiting for all of those fences to signal using vkWaitForFences with an infinite timeout and waitAll set to VK_TRUE."*/
-		//and this is equivalent to use the fence and block the CPU until it has reached that point (where all our command list/copy commands are finished).
-		vkWaitForFences(m_Device, 1, &memoryTransferredFence, VK_TRUE, UINT64_MAX);
-
-		// -- 
-
-		vkDestroyFence(m_Device, memoryTransferredFence, nullptr);
-		vkFreeCommandBuffers(m_Device, m_TemporaryCommandPool, 1, &tempCommandBuffer);
+		EndSingleTimeCommands(tempCommandBuffer);
 	}
 
 	void CreateSyncObjects()
@@ -944,7 +1277,7 @@ private:
 		//Now we are going to describe the vertex data that we are going to feed to the vertex shader
 		//its similar to what we do for vertex attributes on OGL. 
 		VkVertexInputBindingDescription bindingDescription = Vertex::GetBindingDescription();
-		std::array<VkVertexInputAttributeDescription, 2> attributeDescriptions = Vertex::GetAttributeDescriptions();
+		std::array<VkVertexInputAttributeDescription, 3> attributeDescriptions = Vertex::GetAttributeDescriptions();
 
 		VkPipelineVertexInputStateCreateInfo vertexInputInfo = {};
 		vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
@@ -1130,33 +1463,7 @@ private:
 		m_RenderTargetViews.resize(m_RenderTargets.size());
 
 		for (uint32_t i = 0; i < m_RenderTargets.size(); i++)
-		{
-			VkImageViewCreateInfo viewCreateInfo = {};
-			viewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-			viewCreateInfo.image = m_RenderTargets[i];
-
-			//it can be 1D, 2D, 3D and cube maps
-			viewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-
-			viewCreateInfo.format = m_RenderTargetFormat;
-
-			viewCreateInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
-			viewCreateInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
-			viewCreateInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
-			viewCreateInfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
-
-			//we will define an image to be used as color, but without any mips or multiple layers
-			//so we set the base mip as 0 and we say that we only have 1 (the base)
-			//the same happens for the layer
-			//Layer is usually used for VR and such applications
-			viewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-			viewCreateInfo.subresourceRange.baseMipLevel = 0;
-			viewCreateInfo.subresourceRange.levelCount = 1;
-			viewCreateInfo.subresourceRange.baseArrayLayer = 0;
-			viewCreateInfo.subresourceRange.layerCount = 1;
-
-			VkCheck(vkCreateImageView(m_Device, &viewCreateInfo, nullptr, &m_RenderTargetViews[i]));
-		}
+			m_RenderTargetViews[i] = CreateImageView(m_RenderTargets[i], m_RenderTargetFormat);
 	}
 
 	void CreateSwapChain()
@@ -1306,7 +1613,7 @@ private:
 
 	VkExtent2D ChooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilities)
 	{
-		if (capabilities.currentExtent.width != std::numeric_limits<uint32_t>::max())
+		if (capabilities.currentExtent.width != uint32_t(-1))
 			return capabilities.currentExtent;
 		
 		int width, height;
@@ -1376,6 +1683,7 @@ private:
 		queueCreateInfo.pQueuePriorities = &queuePriority;
 
 		VkPhysicalDeviceFeatures deviceFeatures = {};
+		deviceFeatures.samplerAnisotropy = VK_TRUE;
 
 		VkDeviceCreateInfo deviceCreateInfo = {};
 		deviceCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -1483,6 +1791,7 @@ private:
 
 			//If we don't have Geometry Shaders as a feature on this GPU, let's zero the score.
 			score *= deviceFeatures.geometryShader;
+			score *= deviceFeatures.samplerAnisotropy;
 
 			//Let's check if our GPU has a Queue Family in which support graphics commands (such as draw)
 			//as this is a must, we will zero the score if it doesn't support.
@@ -1861,6 +2170,11 @@ private:
 	{
 		CleanupSwapChain();
 
+		vkDestroySampler(m_Device, m_TextureSampler, nullptr);
+		vkDestroyImageView(m_Device, m_TextureImageView, nullptr);
+		vkDestroyImage(m_Device, m_TextureImageObj, nullptr);
+		vkFreeMemory(m_Device, m_TextureImageObjMemory, nullptr);
+
 		for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
 		{
 			vkDestroyBuffer(m_Device, m_UniformBuffers[i], nullptr);
@@ -1963,6 +2277,10 @@ private:
 	VkBuffer m_IndexBuffer;
 	VkDeviceMemory m_IndexBufferMemory;
 
+	VkImage m_TextureImageObj;
+	VkDeviceMemory m_TextureImageObjMemory;
+	VkImageView m_TextureImageView;
+	VkSampler m_TextureSampler;
 	
 
 	bool m_WindowResized = false;
