@@ -27,11 +27,23 @@
 #include <fstream>
 
 #include <map>
+#include <unordered_map>
 
+#define GLM_ENABLE_EXPERIMENTAL
+#include <glm/gtx/hash.hpp>
+
+#define TINYOBJLOADER_IMPLEMENTATION
+#include <tinyobjloader/tiny_obj_loader.h>
 
 const uint32_t APP_WIDTH = 2560;
 const uint32_t APP_HEIGHT = 1440;
 const uint32_t MAX_FRAMES_IN_FLIGHT = 3;
+
+//const std::string MODEL_PATH = "res/models/viking_room.obj";
+//const std::string TEXTURE_PATH = "res/textures/viking_room.png";
+
+const std::string MODEL_PATH = "res/exp/backpack.obj";
+const std::string TEXTURE_PATH = "res/exp/diffuse.jpg";
 
 static uint32_t s_CurrentFrame = 0;
 
@@ -49,6 +61,12 @@ struct Vertex
 	glm::vec3 position;
 	glm::vec3 color;
 	glm::vec2 texCoord;
+
+	bool operator==(const Vertex& other) const
+	{
+		return (position == other.position) && (color == other.color) && (texCoord == other.texCoord);
+	}
+
 
 	static VkVertexInputBindingDescription GetBindingDescription()
 	{
@@ -98,23 +116,20 @@ struct Vertex
 	}
 };
 
-static const std::vector<Vertex> s_Vertices = {
-	{{-0.5f, -0.5f, 0.0f}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
-	{{0.5f, -0.5f, 0.0f}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},
-	{{0.5f, 0.5f, 0.0f}, {0.0f, 0.0f, 1.0f}, {1.0f, 1.0f}},
-	{{-0.5f, 0.5f, 0.0f}, {1.0f, 1.0f, 1.0f}, {0.0f, 1.0f}},
+//Quick hash generation by combining the fields of the struct so we can just
+//generate a decent index for it when generating the index buffer using a hash table
+namespace std {
+	template<> struct hash<Vertex> {
+		size_t operator()(Vertex const& vertex) const {
+			return ((hash<glm::vec3>()(vertex.position) ^
+				(hash<glm::vec3>()(vertex.color) << 1)) >> 1) ^
+				(hash<glm::vec2>()(vertex.texCoord) << 1);
+		}
+	};
+}
 
-	{ {-0.5f, -0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
-	{{0.5f, -0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},
-	{{0.5f, 0.5f, -0.5f}, {0.0f, 0.0f, 1.0f}, {1.0f, 1.0f}},
-	{{-0.5f, 0.5f, -0.5f}, {1.0f, 1.0f, 1.0f}, {0.0f, 1.0f}}
-};
-
-const std::vector<uint16_t> s_Indices =
-{
-    0, 1, 2, 2, 3, 0,
-    4, 5, 6, 6, 7, 4
-};
+std::vector<Vertex> s_Vertices;
+std::vector<uint32_t> s_Indices;
 
 struct UniformBufferObject
 {
@@ -251,6 +266,7 @@ public:
 		//CreateDataBuffer<Vertex>(EBufferType::EBUFFER_TYPE_VERTEX_BUFFER, s_Vertices);
 		//CreateDataBuffer<uint16_t>(EBufferType::EBUFFER_TYPE_INDEX_BUFFER, s_Indices);
 
+		LoadModel();
 		// It is a good practice to combine multiple buffers into a single VkBuffer. We are doing that for indices and vertices. We then use the offsets to properly bind those
 		CreateAndCombineDataBuffer();
 		CreateUniformBuffer();
@@ -418,8 +434,10 @@ private:
 
 	void CreateTextureImage()
 	{
+		//stbi_set_flip_vertically_on_load(true);
+
 		int texWidth = 0, texHeight = 0, numChannels = 0;
-		stbi_uc* data = stbi_load("res/textures/texture.jpg", &texWidth, &texHeight, &numChannels, STBI_rgb_alpha);
+		stbi_uc* data = stbi_load(TEXTURE_PATH.c_str(), &texWidth, &texHeight, &numChannels, STBI_rgb_alpha);
 
 		VkDeviceSize imageSize = texHeight * texWidth * STBI_rgb_alpha;
 
@@ -719,6 +737,7 @@ private:
 		UniformBufferObject UBO = {};
 
 		UBO.model = glm::rotate(glm::mat4(1.0f), glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f)) * glm::rotate(glm::mat4(1.0f), time * glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+		UBO.model *= glm::scale(glm::mat4(1.0f), glm::vec3(0.2f, 0.2f, 0.2f));
 
 		UBO.view = glm::lookAt(glm::vec3(0.0f, 1.0f, 2.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
 
@@ -1031,7 +1050,7 @@ private:
 		//You just set the beginning of the index buffer. Vulkan will use this information and run through the index buffer, probably it takes the index you want and multiply that for the stride of the vertex, then it sums the vertex offset, leading to the desired vertex.
 		//If you feed the data correctly, when the index buffer reaches the end, it will also reach the end of the vertex buffer, stopping one element before starting the index buffer (since we are using the very same buffer).
 		//If you feed incorrectly, then it can begin to fetch data from the IB itself.
-		vkCmdBindIndexBuffer(buffer, m_VertexBuffer, sizeof(s_Vertices[0]) * s_Vertices.size(), VK_INDEX_TYPE_UINT16);
+		vkCmdBindIndexBuffer(buffer, m_VertexBuffer, sizeof(s_Vertices[0]) * s_Vertices.size(), VK_INDEX_TYPE_UINT32);
 
 		VkViewport viewport = {};
 		viewport.x = 0.0f;
@@ -1134,6 +1153,7 @@ private:
 		//Also, the DONT_CARE is basically: I don't care about what values it has, I don't want to set it to any specific value, just use some fast clear algorithm for me.
 		//Usually that's the case when you are not dealing with depth buffers (in which you do want to specify a value to clear).	
 		colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+
 		//This is after we draw to the buffer. We only have two options, to keep the image in memory to read later or to set it as undefined and don't do anything.
 		//We also could DONT_CARE about it. And we say that it probably will never show up outside a render/subpass. Sounds good for internal ops
 		colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -1230,8 +1250,11 @@ private:
 		dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
 		
 
-		//we also specify what kind of access we are doing on each subass. In our case, the source subpass (prior to us)
+		//we also specify what kind of access we are doing on each subpass. In our case, the source subpass (prior to us)
 		//are going to write to this render target.
+		//or VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, we are just stalling ourselves in VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT, waiting for the depth buffer to finish its write to then access it
+		//via early fragment tests. So just by waiting the color buffer to finish its write before sending to swap chain (outputting it) and waiting the depth buffer to finish its write before accessing it on the early fragment tests
+		//we synchronize the resources without explicit barriers.
 		dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 		
 		//we are not doing anything other than presenting it at the swap chain (not using it in any shader or so)
@@ -2254,6 +2277,56 @@ private:
 		//this time the GPU always have a command buffer to execute while returning the previous image back to CPU.
 		//this is still single threaded but using a different render target for CPU and GPU. (just like we do on dx12)
 		s_CurrentFrame = (s_CurrentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
+	}
+
+
+	void LoadModel()
+	{
+		tinyobj::attrib_t atb;
+		std::vector<tinyobj::shape_t> shapes;
+		std::vector<tinyobj::material_t> materials;
+		std::string warn, err;
+		
+		std::unordered_map<Vertex, uint32_t> uniqueVertices = {};
+
+
+		if (!tinyobj::LoadObj(&atb, &shapes, &materials, &warn, &err, MODEL_PATH.c_str()))
+		{
+			std::cerr << warn << "\n" << err << std::endl;
+			__debugbreak();
+		}
+
+		for (const tinyobj::shape_t& shape : shapes)
+			for(const tinyobj::index_t& index : shape.mesh.indices)
+			{
+				Vertex vertex = {};
+
+				vertex.position =
+				{
+					atb.vertices[3 * index.vertex_index + 0],
+					atb.vertices[3 * index.vertex_index + 1],
+					atb.vertices[3 * index.vertex_index + 2]
+				};
+
+				vertex.texCoord =
+				{
+					atb.texcoords[2 * index.texcoord_index + 0],
+					atb.texcoords[2 * index.texcoord_index + 1]
+				};
+
+				vertex.color = { 1.0f, 1.0f, 1.0f };
+
+				if (uniqueVertices.count(vertex) == 0)
+				{
+					uniqueVertices[vertex] = (uint32_t)s_Vertices.size();
+					s_Vertices.emplace_back(vertex);
+				}
+				
+				s_Indices.emplace_back(uniqueVertices[vertex]);
+			}
+
+	
+
 	}
 
 	void Destroy()
